@@ -1,4 +1,17 @@
 # -*- coding: utf-8 -*-
+
+# костыль для Python 3.13: модуля imghdr больше нет, а python-telegram-bot его ждёт
+import sys, types, pathlib
+imghdr = types.ModuleType("imghdr")
+
+def what(file, h=None):
+    # очень простая проверка по расширению файла
+    suffix = pathlib.Path(file).suffix.lower().lstrip(".")
+    return suffix or None
+
+imghdr.what = what
+sys.modules["imghdr"] = imghdr
+
 import asyncio
 import logging
 import os
@@ -6,6 +19,7 @@ from datetime import datetime
 
 from openai import OpenAI
 from telegram import Update
+
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -296,4 +310,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
