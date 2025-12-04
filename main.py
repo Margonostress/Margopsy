@@ -1,26 +1,16 @@
 # -*- coding: utf-8 -*-
 
-# костыль для Python 3.13: модуля imghdr больше нет, а python-telegram-bot его ждёт
-import sys, types, pathlib
-imghdr = types.ModuleType("imghdr")
-
-def what(file, h=None):
-    # очень простая проверка по расширению файла
-    suffix = pathlib.Path(file).suffix.lower().lstrip(".")
-    return suffix or None
-
-imghdr.what = what
-sys.modules["imghdr"] = imghdr
-
 import asyncio
 import logging
 import os
 from datetime import datetime
 
 from openai import OpenAI
-from telegram import Update
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import CommandStart
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+# -------- КЛЮЧИ И КЛИЕНТЫ --------
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,6 +19,10 @@ if not OPENAI_API_KEY or not TELEGRAM_TOKEN:
     raise RuntimeError("Установи OPENAI_API_KEY и TELEGRAM_TOKEN в переменных окружения")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+
+# -------- ЛОГИ --------
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,12 +30,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
+# максимум расчётов и уточняющих вопросов на пользователя
 MAX_CALCULATIONS = 3
 MAX_FOLLOWUP_QUESTIONS = 3
 
-user_data = {}
+# хранилище состояний пользователей
+user_data: dict[int, dict] = {}
+
+# -------- СИСТЕМНЫЕ ПРОМПТЫ --------
 
 SYSTEM_PROMPT_MATRIX = """
 Ты — профессор Альвасариус, помощник Богатой Ведьмы Марго.
@@ -103,8 +99,9 @@ SYSTEM_PROMPT_FOLLOWUP = """
 Пусть человек почувствует, что ты его слышишь и понимаешь.
 """
 
+# -------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ --------
 
-def parse_dob(text: str):
+def parse_dob(text: str) -> str | None:
     """Пытаемся вытащить дату рождения в формате ДД.ММ.ГГГГ / ДД-ММ-ГГГГ / ДД/ММ/ГГГГ."""
     text = text.strip()
     for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y"):
@@ -143,7 +140,7 @@ def ask_openai_calculation(dob: str, is_forecast: bool = False) -> str:
             "Сделай разбор Матрицы Рода по структуре, описанной в системном сообщении. "
             "Пиши ОЧЕНЬ подробно и развёрнуто по каждому пункту. Давай глубокий анализ полотнами текста."
         )
-    
+
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -160,7 +157,7 @@ def ask_openai_calculation(dob: str, is_forecast: bool = False) -> str:
 
 def ask_openai_followup(question: str, previous_answer: str, dob: str) -> str:
     context = f"Предыдущий разбор для человека с датой рождения {dob}:\n\n{previous_answer}"
-    
+
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -175,140 +172,141 @@ def ask_openai_followup(question: str, previous_answer: str, dob: str) -> str:
     return content.strip() if content else ""
 
 
-async def send_long(update: Update, text: str):
+async def send_long(message: Message, text: str):
     """Режем длинный текст на части, чтобы не упереться в лимит телеги."""
     max_len = 4000
     for i in range(0, len(text), max_len):
         chunk = text[i : i + max_len]
-        await update.message.reply_text(chunk)
+        await message.answer(chunk)
 
+# -------- ХЕНДЛЕРЫ --------
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
     msg = (
         "Привет! Я профессор Альвасариус, помощник Богатой Ведьмы Марго.\n\n"
         "Я могу:\n"
-        "?? Рассчитать твою Матрицу Рода — просто отправь дату рождения\n"
-        "? Сделать прогноз на 2026 год — напиши «прогноз» и дату рождения\n\n"
+        "🔮 Рассчитать твою Матрицу Рода — просто отправь дату рождения\n"
+        "✨ Сделать прогноз на 2026 год — напиши «прогноз» и дату рождения\n\n"
         "Формат даты: ДД.ММ.ГГГГ (например: 07.09.1990)\n\n"
-        "?? Максимум 3 расчёта — потом мне нужен отдых, я же профессор, а не робот!\n\n"
+        "⚠️ Максимум 3 расчёта — потом мне нужен отдых, я же профессор, а не робот!\n\n"
         "После каждого расчёта ты можешь задать мне 3 уточняющих вопроса по своему роду — я отвечу глубоко и по делу."
     )
-    await update.message.reply_text(msg)
+    await message.answer(msg)
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+@dp.message(F.text)
+async def handle_text(message: Message):
+    text = (message.text or "").strip()
+    if not text:
         return
-    
-    text = update.message.text.strip()
-    user_id = update.effective_user.id
-    state = get_user_state(user_id)
 
-    if text.lower().startswith("/start"):
-        return await start(update, context)
+    user_id = message.from_user.id
+    state = get_user_state(user_id)
 
     is_forecast = "прогноз" in text.lower()
     clean_text = text.lower().replace("прогноз", "").strip()
-    dob = parse_dob(clean_text)
-    if not dob:
-        dob = parse_dob(text)
+    dob = parse_dob(clean_text) or parse_dob(text)
 
+    # Если человек прислал дату
     if dob:
         if state["calc_count"] >= MAX_CALCULATIONS:
-            await update.message.reply_text(
-                "Ох, дружок... Я уже сделал для тебя 3 расчёта и порядком устал ??\n"
+            await message.answer(
+                "Ох, дружок... Я уже сделал для тебя 3 расчёта и порядком устал.\n"
                 "Профессору нужен отдых! Приходи позже."
             )
             return
 
         remaining = MAX_CALCULATIONS - state["calc_count"] - 1
-        
+
         if is_forecast:
-            await update.message.reply_text(
+            await message.answer(
                 f"Принял дату {dob}. Секунду, смотрю твои энергии на 2026 год...\n"
                 f"(Осталось расчётов после этого: {remaining})"
             )
         else:
-            await update.message.reply_text(
+            await message.answer(
                 f"Принял дату {dob}. Секунду, погружаюсь в твою Матрицу Рода...\n"
                 f"(Осталось расчётов после этого: {remaining})"
             )
 
         try:
             answer = await asyncio.to_thread(ask_openai_calculation, dob, is_forecast)
-            
+
             state["calc_count"] += 1
             state["last_answer"] = answer
             state["last_dob"] = dob
             state["last_mode"] = "forecast" if is_forecast else "matrix"
             state["followup_count"] = 0
-            
-            await send_long(update, answer)
-            
-            await update.message.reply_text(
-                "? Если хочешь копнуть глубже — можешь задать мне до 3 уточняющих вопросов по своему роду. "
+
+            await send_long(message, answer)
+
+            await message.answer(
+                "Если хочешь копнуть глубже — можешь задать мне до 3 уточняющих вопросов по своему роду. "
                 "Спрашивай что угодно: про отношения, деньги, здоровье, конкретные ситуации... Я отвечу."
             )
-            
+
         except Exception as e:
             logger.exception("Ошибка при запросе к OpenAI: %s", e)
-            await update.message.reply_text(
+            await message.answer(
                 "У меня сейчас научный коллапс на сервере. Попробуй ещё раз чуть позже."
             )
-    else:
-        if state["last_answer"] and state["followup_count"] < MAX_FOLLOWUP_QUESTIONS:
-            remaining_questions = MAX_FOLLOWUP_QUESTIONS - state["followup_count"] - 1
-            
-            await update.message.reply_text(
-                f"Хороший вопрос! Сейчас посмотрю...\n"
-                f"(Осталось уточняющих вопросов: {remaining_questions})"
+        return
+
+    # Если даты нет, но есть предыдущий разбор — считаем вопрос уточняющим
+    if state["last_answer"] and state["followup_count"] < MAX_FOLLOWUP_QUESTIONS:
+        remaining_questions = MAX_FOLLOWUP_QUESTIONS - state["followup_count"] - 1
+
+        await message.answer(
+            f"Хороший вопрос! Сейчас посмотрю...\n"
+            f"(Осталось уточняющих вопросов: {remaining_questions})"
+        )
+
+        try:
+            answer = await asyncio.to_thread(
+                ask_openai_followup,
+                text,
+                state["last_answer"],
+                state["last_dob"],
             )
-            
-            try:
-                answer = await asyncio.to_thread(
-                    ask_openai_followup, 
-                    text, 
-                    state["last_answer"], 
-                    state["last_dob"]
+            state["followup_count"] += 1
+            await send_long(message, answer)
+
+            if state["followup_count"] >= MAX_FOLLOWUP_QUESTIONS:
+                await message.answer(
+                    "Это был твой третий уточняющий вопрос. "
+                    "Если хочешь новый расчёт — отправь другую дату рождения."
                 )
-                state["followup_count"] += 1
-                await send_long(update, answer)
-                
-                if state["followup_count"] >= MAX_FOLLOWUP_QUESTIONS:
-                    await update.message.reply_text(
-                        "Это был твой третий уточняющий вопрос. Если хочешь новый расчёт — отправь другую дату рождения."
-                    )
-                    
-            except Exception as e:
-                logger.exception("Ошибка при запросе к OpenAI: %s", e)
-                await update.message.reply_text(
-                    "У меня сейчас научный коллапс на сервере. Попробуй ещё раз чуть позже."
-                )
-        
-        elif state["last_answer"] and state["followup_count"] >= MAX_FOLLOWUP_QUESTIONS:
-            await update.message.reply_text(
-                "Ты уже задал 3 уточняющих вопроса по этому расчёту.\n"
-                "Хочешь новый разбор? Отправь другую дату рождения (ДД.ММ.ГГГГ)."
+
+        except Exception as e:
+            logger.exception("Ошибка при запросе к OpenAI: %s", e)
+            await message.answer(
+                "У меня сейчас научный коллапс на сервере. Попробуй ещё раз чуть позже."
             )
-        else:
-            await update.message.reply_text(
-                "Я профессор, но не экстрасенс — дату рождения я так не пойму ??\n"
-                "Напиши в формате ДД.ММ.ГГГГ, например: 07.09.1990\n"
-                "Для прогноза на 2026: «прогноз 07.09.1990»"
-            )
+        return
 
+    # Лимит уточняющих уже исчерпан
+    if state["last_answer"] and state["followup_count"] >= MAX_FOLLOWUP_QUESTIONS:
+        await message.answer(
+            "Ты уже задал 3 уточняющих вопроса по этому расчёту.\n"
+            "Хочешь новый разбор? Отправь другую дату рождения (ДД.ММ.ГГГГ)."
+        )
+        return
 
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Вообще ни даты, ни предыдущего разбора
+    await message.answer(
+        "Я профессор, но не экстрасенс — дату рождения я так не пойму 😊\n"
+        "Напиши в формате ДД.ММ.ГГГГ, например: 07.09.1990\n"
+        "Для прогноза на 2026: «прогноз 07.09.1990»"
+    )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+# -------- ЗАПУСК --------
 
+async def main():
     logger.info("Бот Профессор Альвасариус запущен.")
-    application.run_polling(drop_pending_updates=True)
+    await dp.start_polling(bot, allowed_updates=["message"])
 
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
 
