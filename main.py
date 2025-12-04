@@ -301,7 +301,7 @@ def ask_openai_calculation(dob: str, name: str | None, gender: str | None, is_fo
         system_prompt = SYSTEM_PROMPT_FORECAST
         user_prompt = (
             f"Имя: {name}\n"
-            fПол: {gender}\n"
+            f"Пол: {gender}\n"
             f"Дата рождения: {dob}\n\n"
             "Сделай глубокий родовой прогноз на 2026 год по структуре, описанной в системном сообщении. "
             "Пиши развёрнуто, так чтобы текста хватило на 3–4 длинных сообщения в Телеграме."
@@ -328,6 +328,7 @@ def ask_openai_calculation(dob: str, name: str | None, gender: str | None, is_fo
     )
     content = resp.choices[0].message.content
     return content.strip() if content else ""
+
 
 
 def ask_openai_followup(question: str, previous_answer: str, dob: str, name: str | None, gender: str | None) -> str:
@@ -531,5 +532,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
