@@ -437,7 +437,7 @@ def ask_openai_calculation(name: str, gender: str, dob: str, is_forecast: bool =
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.7,
-        max_tokens=6000,
+        max_tokens=4000,
         timeout=120,
     )
     content = resp.choices[0].message.content or ""
@@ -481,7 +481,7 @@ def ask_openai_followup(
             {"role": "user", "content": context},
         ],
         temperature=0.7,
-        max_tokens=6000,
+        max_tokens=4000,
         timeout=90,
     )
     content = resp.choices[0].message.content or ""
@@ -493,7 +493,7 @@ async def send_long(message: Message, text: str):
     Отправляем длинный текст кусками по ~3500 символов,
     стараясь резать по границам абзацев/предложений.
     """
-    max_len = 6000
+    max_len = 3800
     s = text
     while s:
         if len(s) <= max_len:
@@ -757,6 +757,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
